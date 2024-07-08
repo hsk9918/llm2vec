@@ -71,7 +71,9 @@ logger = logging.getLogger(__name__)
 MODEL_CONFIG_CLASSES = list(MODEL_FOR_MASKED_LM_MAPPING.keys())
 MODEL_TYPES = tuple(conf.model_type for conf in MODEL_CONFIG_CLASSES)
 
-
+'''
+加载模型
+'''
 def get_model_class(config):
     config_class_name = config.__class__.__name__
     if config_class_name == "MistralConfig":
@@ -85,7 +87,9 @@ def get_model_class(config):
     else:
         raise ValueError(f"Model class {config_class_name} not supported.")
 
-
+'''
+将LoRA技术应用于指定的模型
+'''
 def initialize_peft(
     model,
     lora_r: int = 8,
@@ -390,7 +394,14 @@ class CustomArguments:
         metadata={"help": "The type of data collator. Options: default, all_mask"},
     )
 
-
+'''
+在每个批次中为MLM任务准备数据。它确保每个批次中的一定比例的token被替换为掩码token,并且这些掩码token的预测是模型训练的目标
+掩码的token:在输入序列中被替换为掩码token(例如,ID为0)。
+对应的标签:在标签序列中,被掩码的token的位置会被设置为它们原本的token ID)这样模型需要预测这些token。
+而未被掩码的token:
+在输入序列中保持不变。
+在标签序列中，它们的位置会被设置为-100,这样在计算损失时,这些位置不会对梯度有所贡献。
+'''
 class DataCollatorForLanguageModelingWithFullMasking(DataCollatorForLanguageModeling):
     def torch_mask_tokens(
         self,
@@ -440,7 +451,7 @@ class StopTrainingCallback(TrainerCallback):
 class MNTPTrainer(Trainer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.label_names = ["labels"]
+        self.label_names = ["labels"] #包含在评估阶段用于计算指标的标签名称
 
     def _remove_unused_columns(
         self, dataset: "datasets.Dataset", description: Optional[str] = None
@@ -448,6 +459,7 @@ class MNTPTrainer(Trainer):
         return dataset
 
     # We need a custom save function as we have to save the inner model
+    #它首先确定保存的目录，然后调用模型的 save_peft_model 方法来保存经过LoRA调整的模型，保存分词器，并保存训练参数。
     def _save(self, output_dir: Optional[str] = None, state_dict=None):
         # If we are executing this function, we are the process zero, so we don't check for that.
         output_dir = output_dir if output_dir is not None else self.args.output_dir
@@ -484,6 +496,8 @@ def main():
             custom_args,
         ) = parser.parse_args_into_dataclasses()
 
+    #梯度检查点是一种节省GPU内存的技术，它在正向传播过程中丢弃一些中间梯度，然后在反向传播时重新计算它们。
+    #use_reentrant 参数通常与多线程有关，这里设置为 False 可能是为了避免在多线程环境下的潜在问题。
     if training_args.gradient_checkpointing:
         training_args.gradient_checkpointing_kwargs = {"use_reentrant": False}
 
@@ -529,11 +543,12 @@ def main():
     logger.info(f"Training/evaluation parameters {training_args}")
 
     # Detecting last checkpoint.
+    #处理训练过程中的检查点（checkpoint）检测和恢复逻辑
     last_checkpoint = None
     if (
-        os.path.isdir(training_args.output_dir)
-        and training_args.do_train
-        and not training_args.overwrite_output_dir
+        os.path.isdir(training_args.output_dir)  #目录存在
+        and training_args.do_train               #确认执行训练操作
+        and not training_args.overwrite_output_dir   #不覆盖输出目录中的现有内容
     ):
         last_checkpoint = get_last_checkpoint(training_args.output_dir)
         if last_checkpoint is None and len(os.listdir(training_args.output_dir)) > 0:
@@ -550,6 +565,7 @@ def main():
             )
 
     # Set seed before initializing model.
+    #确保实验可重复
     set_seed(training_args.seed)
 
     # Get the datasets: you can either provide your own CSV/JSON/TXT training and evaluation files (see below)
@@ -562,7 +578,8 @@ def main():
     # In distributed training, the load_dataset function guarantee that only one local process can concurrently
     # download the dataset.
     if data_args.dataset_name is not None:
-        # Downloading and loading a dataset from the hub.
+        # 从 Hugging Face Hub 加载数据集：
+        # cache_dir 用于指定缓存目录，token 用于认证（如果需要），streaming 表示是否以流式处理数据。
         raw_datasets = load_dataset(
             data_args.dataset_name,
             data_args.dataset_config_name,
@@ -570,6 +587,7 @@ def main():
             token=model_args.token,
             streaming=data_args.streaming,
         )
+        # 如果下载的数据集中没有包含 "validation" 部分，则使用 load_dataset 函数创建验证集和训练集，分割比例由 data_args.validation_split_percentage 指定。
         if "validation" not in raw_datasets.keys():
             raw_datasets["validation"] = load_dataset(
                 data_args.dataset_name,
@@ -588,6 +606,7 @@ def main():
                 streaming=data_args.streaming,
             )
     else:
+        # 如果用户没有提供 data_args.dataset_name，则脚本会检查是否存在本地的训练和验证文件，并使用这些文件：
         data_files = {}
         if data_args.train_file is not None:
             data_files["train"] = data_args.train_file
@@ -629,6 +648,8 @@ def main():
     # Distributed training:
     # The .from_pretrained methods guarantee that only one local process can concurrently
     # download model & vocab.
+    # 创建一个名为 config_kwargs 的字典，它包含了配置模型时需要的一些参数，如缓存目录、版本号、认证令牌以及是否信任远程代码。
+    # 根据提供的参数配置和加载模型的配置类。
     config_kwargs = {
         "cache_dir": model_args.cache_dir,
         "revision": model_args.model_revision,
@@ -649,6 +670,7 @@ def main():
             config.update_from_string(model_args.config_overrides)
             logger.info(f"New config: {config}")
 
+    # 加载和配置分词器（tokenizer）的，确保它与模型兼容并根据需要设置特殊的token。
     tokenizer_kwargs = {
         "cache_dir": model_args.cache_dir,
         "use_fast": model_args.use_fast_tokenizer,
@@ -671,6 +693,8 @@ def main():
         )
 
     # blank, eos, mask
+    # 如果分词器没有设置掩码token，根据 custom_args.mask_token_type 的值来设置掩码token。
+    # 用户可以选择使用下划线 _、结束token eos_token，或者自定义的 <mask> token。如果提供了不支持的类型，则抛出异常。
     if tokenizer.mask_token is None:
         if custom_args.mask_token_type == "blank":
             tokenizer.mask_token = "_"
@@ -683,7 +707,7 @@ def main():
             raise ValueError(
                 f"mask_token_type {custom_args.mask_token_type} is not supported."
             )
-
+    # 如果分词器没有设置填充token，这里将其默认设置为结束token，以确保分词器可以处理序列填充。
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -717,12 +741,15 @@ def main():
 
     # We resize the embeddings only when necessary to avoid index errors. If you are creating a model from scratch
     # on a small vocab and want a smaller embedding size, remove this test.
+    # 根据分词器中的不同token数量调整模型的嵌入层大小。
+    # 确保了模型的嵌入层可以容纳分词器中的所有token，避免在训练或评估过程中出现索引错误。
     embedding_size = model.get_input_embeddings().weight.shape[0]
     if len(tokenizer) > embedding_size:
         model.resize_token_embeddings(len(tokenizer))
 
     # Preprocessing the datasets.
     # First we tokenize all the texts.
+    # 用于确定数据集中用于训练或评估的文本列名称的
     if training_args.do_train:
         column_names = list(raw_datasets["train"].features)
     else:
@@ -746,10 +773,12 @@ def main():
             )
         max_seq_length = min(data_args.max_seq_length, tokenizer.model_max_length)
 
+    #使用 Hugging Face datasets 库来处理和准备文本数据，用于训练或评估语言模型。
     if data_args.line_by_line:
         # When using line_by_line, we just tokenize each nonempty line.
         padding = "max_length" if data_args.pad_to_max_length else False
 
+        # 接收一批样本（examples），删除空行或只包含空白字符的行，然后使用 tokenizer 对剩余行进行分词。
         def tokenize_function(examples):
             # Remove empty lines
             examples[text_column_name] = [
@@ -811,6 +840,7 @@ def main():
 
         # Main data processing function that will concatenate all texts from our dataset and generate chunks of
         # max_seq_length.
+        # 将数据集中的所有文本连接起来，并按照指定的序列长度 max_seq_length 将它们分割成多个小块（chunks）。
         def group_texts(examples):
             # Concatenate all texts.
             concatenated_examples = {
@@ -851,11 +881,13 @@ def main():
                     group_texts,
                     batched=True,
                 )
-
+    # 训练流程中的一个检查点，确保训练数据集被正确加载和处理。
     if training_args.do_train:
         if "train" not in tokenized_datasets:
             raise ValueError("--do_train requires a train dataset")
         train_dataset = tokenized_datasets["train"]
+        # 计算 train_dataset 的长度和 data_args.max_train_samples 的较小值，以确定实际使用的训练样本数。
+        # 使用 train_dataset.select(range(max_train_samples)) 从训练数据集中选择前 max_train_samples 个样本，以满足用户指定的最大样本数限制。
         if data_args.max_train_samples is not None:
             max_train_samples = min(len(train_dataset), data_args.max_train_samples)
             train_dataset = train_dataset.select(range(max_train_samples))
@@ -873,10 +905,11 @@ def main():
                 # Depending on the model and config, logits may contain extra tensors,
                 # like past_key_values, but logits always come first
                 logits = logits[0]
-            return logits.argmax(dim=-1)
+            return logits.argmax(dim=-1)  # 使用 argmax(dim=-1) 计算logits的每个序列的最高概率token索引，这代表了模型预测的token ID。
 
         metric = evaluate.load("accuracy", cache_dir=model_args.cache_dir)
 
+        # MNTP的计算
         def compute_metrics(eval_preds):
             preds, labels = eval_preds
             preds = preds[:, :-1]
@@ -892,6 +925,8 @@ def main():
 
     # Data collator
     # This one will take care of randomly masking the tokens.
+    # 创建一个数据整理器（data collator），它将用于准备模型训练或评估过程中的输入数据。
+    # 代码确保了数据整理器的选择和配置与用户指定的参数一致
     pad_to_multiple_of_8 = (
         data_args.line_by_line
         and training_args.fp16
@@ -952,7 +987,6 @@ def main():
             else len(train_dataset)
         )
         metrics["train_samples"] = min(max_train_samples, len(train_dataset))
-
         trainer.log_metrics("train", metrics)
         trainer.save_metrics("train", metrics)
         trainer.save_state()

@@ -29,7 +29,7 @@ from .models import (
 
 logger = logging.getLogger(__name__)
 
-
+# 用于将PyTorch批次数据发送到指定的设备（CPU或GPU）。
 def batch_to_device(batch, target_device: device):
     """
     send a pytorch batch to a device (CPU/GPU)
@@ -135,6 +135,7 @@ class LLM2Vec(nn.Module):
 
         return cls(model=model, tokenizer=tokenizer, **config)
 
+    # 用于在将文本输入模型之前对其进行预处理。
     def prepare_for_tokenization(self, text):
         if self.model.config._name_or_path == "meta-llama/Meta-Llama-3-8B-Instruct":
             text = (
@@ -170,9 +171,10 @@ class LLM2Vec(nn.Module):
                 text = text.strip() + "<|endoftext|>"
         return text
 
+    #不需要embedding:instruction
     def tokenize(self, texts):
-        texts_2 = []
-        original_texts = []
+        texts_2 = []  # 用于存储经过特定处理的文本
+        original_texts = []  # 用于存储原始文本
         for text in texts:
             t = text.split("!@#$%^&*()")
             texts_2.append(t[1] if len(t) > 1 else "")
@@ -220,6 +222,7 @@ class LLM2Vec(nn.Module):
         )
         sentence_feature["attention_mask"] = sentence_feature["embed_mask"]
 
+
     def forward(self, sentence_feature: Dict[str, Tensor]):
         embed_mask = None
         if "embed_mask" in sentence_feature:
@@ -228,7 +231,7 @@ class LLM2Vec(nn.Module):
         sentence_feature["embed_mask"] = embed_mask
 
         return self.get_pooling(sentence_feature, reps.last_hidden_state)
-
+    # 用于从模型的最后隐藏状态中提取句子或文档的嵌入表示。
     def get_pooling(self, features, last_hidden_states):  # All models padded from left
         assert (
             self.tokenizer.padding_side == "left"
@@ -263,6 +266,7 @@ class LLM2Vec(nn.Module):
         else:
             raise ValueError(f"{self.pooling_mode} is not implemented yet.")
 
+    # 用于将指令（instruction）和文本（text）转换为适合模型输入的字符串格式。
     def _convert_to_str(self, instruction, text):
         tokenized_q = self.tokenizer(
             text,
@@ -306,15 +310,12 @@ class LLM2Vec(nn.Module):
         """
         Encode a list of sentences to their respective embeddings. The sentences can be a list of strings or a string.
         Args:
-            sentences: sentence or sentences to encode.
-            batch_size: batch size for turning sentence tokens into embeddings.
-            show_progress_bar: whether to show progress bars during encoding steps.
-            convert_to_numpy: If true, return numpy arrays instead of torch tensors.
-            convert_to_tensor: If true, return torch tensors (default).
-            device: torch backend device identifier (e.g., 'cuda', 'cpu','mps' etc.). If not specified,
-            the default is to use cuda when available, otherwise cpu. Note that only the choice of 'cuda' supports
-            multiprocessing as currently implemented.
-
+            sentences:要编码的一个或多个句子。
+            batch_size:将句子标记转换为嵌入时的批次大小。
+            show_progress_bar:在编码步骤期间是否显示进度条。
+            convert_to_numpy:如果为真，则返回 NumPy 数组，而不是 PyTorch 张量。
+            convert_to_tensor:如果为真,则返回 PyTorch 张量（默认）。
+            devicePyTorch 后端设备的标识符（例如 'cuda', 'cpu', 'mps' 等）。如果没有指定，默认在可用时使用 'cuda'，否则使用 'cpu'。注意，目前只有 'cuda' 选项支持多进程。
         Returns: embeddings of the sentences. Embeddings are detached and always on the CPU (see _encode implementation).
 
         """
@@ -341,6 +342,7 @@ class LLM2Vec(nn.Module):
         if convert_to_tensor:
             convert_to_numpy = False
 
+        # 根据句子长度对句子进行排序，并按 batch_size 分批处理。
         length_sorted_idx = np.argsort([-self._text_length(sen) for sen in sentences])
         sentences_sorted = [sentences[idx] for idx in length_sorted_idx]
         all_embeddings = []
@@ -393,7 +395,8 @@ class LLM2Vec(nn.Module):
 
                 all_embeddings = [result.get() for result in results]
                 progress_bar.close()
-
+        # 处理从多个批次中收集的嵌入结果，将其整理并转换为期望的输出格式。
+        # 收集所有批次的嵌入结果，并根据原始句子的顺序进行排序。
         all_embeddings = torch.cat(all_embeddings, dim=0)
         all_embeddings = all_embeddings[np.argsort(length_sorted_idx)]
         all_embeddings = all_embeddings.to(torch.float32)

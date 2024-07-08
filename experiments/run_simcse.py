@@ -203,6 +203,7 @@ class CustomArguments:
     )
 
 
+# 将一批训练样本（features）整理成适合模型训练的格式。
 @dataclass
 class DefaultCollator:
     model: LLM2Vec
